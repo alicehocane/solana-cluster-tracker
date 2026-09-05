@@ -8,15 +8,12 @@ const TRACKED_WALLETS = new Set([
     "835GEJgjDt4B4LzC33vYpt6dQXUWJqkkVnWVnGP3WUKN",
     "7UDarSsvMu64SDyL5dayANca8za87tbyeuAdGjMKWf16",
     "7iG1nhuNPXjUq2D2LJXywBE1zAXQQFzDFvf7hKNjZf26",
-    "EHg5YkU2SZBTvuT87rUsvxArGp3HLeye1fXaSDfuMyaf",
-    "5cQM6QHmdLPS8AEKA8KtszFmC8Rq4YrDj9WpWDtXTqSy",
     "BgpLrxjCPFrvqEUQNrMxhP7ZmDNbjwcaX8fzy3ZuYvzT",
     "BQdbTPv9iuPjU6swSVJEsdv3hutS1UxFstTpx4KRVZEm",
     "3Qchg1ipMKRoqDktu27yNMvcPe3xTHD9q7uJe6Xtbua2",
     "4w8St7tNUNqgAXvXd4BjhkByV1w9vagp2yjUyrnoU4ZS",
     "Ggnm2KVizsXedUrBJqjXtg8ztgCw3C5P6swVfSiFQ2SH",
     "8eGqytw6HWhykdBoA9gNWZv7t7vYr6X8KeoDABU1731y",
-    "4bUNoVcQdCwUnETSHxW9bZrzinx6MhzxL7Bd6bvqYgVh",
     "3bwkvwoYnyC9GMVFn2EWeAJ2YptCnZDWdc284SdWD2gd"
 ]);
 
