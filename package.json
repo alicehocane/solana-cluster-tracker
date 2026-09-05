@@ -1,0 +1,9 @@
+{
+  "name": "solana-cluster-tracker",
+  "version": "1.0.0",
+  "description": "Solana wallet cluster tracking webhook for Discord",
+  "main": "api/webhook.js",
+  "engines": {
+    "node": ">=18.x"
+  }
+}
