@@ -5,5 +5,9 @@
   "main": "api/webhook.js",
   "engines": {
     "node": ">=18.x"
+  },
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.x.x"
   }
 }
