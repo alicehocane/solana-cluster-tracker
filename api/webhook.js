@@ -43,7 +43,7 @@ const BLACKLISTED_TOKENS = new Set([
 ]);
 
 const MIN_SOL_SPEND = 0.05; 
-const HOLDING_CHECK_MS = 3 * 60 * 1000; // 3 Minutes
+const HOLDING_CHECK_MS = 3 * 60 * 1000;
 
 async function sendDiscordAlert(message) {
     try {
@@ -62,11 +62,11 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    res.status(200).json({ status: 'received' });
-
     try {
         const transactions = req.body;
-        if (!Array.isArray(transactions)) return;
+        if (!Array.isArray(transactions)) {
+            return res.status(400).json({ error: 'Invalid payload format' });
+        }
 
         const now = Date.now();
 
@@ -91,7 +91,6 @@ export default async function handler(req, res) {
             const isBuy = tokenTransfer.toUserAccount === involvedTrackedWallet;
             const isSell = tokenTransfer.fromUserAccount === involvedTrackedWallet;
 
-            // 1. IF IT'S A SELL: Mark any pending buy for this wallet/token as cancelled (Dumped under 3 mins)
             if (isSell) {
                 await supabase
                     .from('tracked_pending_buys')
@@ -102,7 +101,6 @@ export default async function handler(req, res) {
                 continue;
             }
 
-            // 2. IF IT'S A BUY: Record it as pending in Supabase
             if (isBuy) {
                 const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
                 if (solSpent < MIN_SOL_SPEND) continue;
@@ -119,7 +117,6 @@ export default async function handler(req, res) {
             }
         }
 
-        // 3. CHECK FOR SURVIVING BUYS (Passed the 3-minute mark without selling)
         const threeMinutesAgo = now - HOLDING_CHECK_MS;
         
         const { data: matureBuys, error } = await supabase
@@ -128,50 +125,49 @@ export default async function handler(req, res) {
             .eq('status', 'pending')
             .lte('buy_timestamp', threeMinutesAgo);
 
-        if (error || !matureBuys) return;
+        if (!error && matureBuys) {
+            for (const buy of matureBuys) {
+                await supabase
+                    .from('tracked_pending_buys')
+                    .update({ status: 'verified' })
+                    .eq('id', buy.id);
 
-        // Process mature buys to check cluster confluence and notify
-        for (const buy of matureBuys) {
-            // Mark as verified so we don't alert twice
-            await supabase
-                .from('tracked_pending_buys')
-                .update({ status: 'verified' })
-                .eq('id', buy.id);
+                const thirtyMinsBefore = buy.buy_timestamp - (30 * 60 * 1000);
+                const thirtyMinsAfter = buy.buy_timestamp + (30 * 60 * 1000);
 
-            // Check how many other unique wallets bought this token within a 30-minute window of this buy
-            const thirtyMinsBefore = buy.buy_timestamp - (30 * 60 * 1000);
-            const thirtyMinsAfter = buy.buy_timestamp + (30 * 60 * 1000);
+                const { data: clusterData } = await supabase
+                    .from('tracked_pending_buys')
+                    .select('wallet')
+                    .eq('token_mint', buy.token_mint)
+                    .gte('buy_timestamp', thirtyMinsBefore)
+                    .lte('buy_timestamp', thirtyMinsAfter);
 
-            const { data: clusterData } = await supabase
-                .from('tracked_pending_buys')
-                .select('wallet')
-                .eq('token_mint', buy.token_mint)
-                .gte('buy_timestamp', thirtyMinsBefore)
-                .lte('buy_timestamp', thirtyMinsAfter);
+                if (!clusterData) continue;
 
-            if (!clusterData) continue;
+                const uniqueWallets = [...new Set(clusterData.map(c => c.wallet))].filter(w => w !== buy.wallet);
 
-            // Extract unique other wallets
-            const uniqueWallets = [...new Set(clusterData.map(c => c.wallet))].filter(w => w !== buy.wallet);
+                if (uniqueWallets.length > 0) {
+                    const shortWallet = `${buy.wallet.slice(0, 4)}...${buy.wallet.slice(-4)}`;
+                    const shortToken = `${buy.token_mint.slice(0, 4)}...${buy.token_mint.slice(-4)}`;
+                    let probabilityScore = uniqueWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
 
-            if (uniqueWallets.length > 0) {
-                const shortWallet = `${buy.wallet.slice(0, 4)}...${buy.wallet.slice(-4)}`;
-                const shortToken = `${buy.token_mint.slice(0, 4)}...${buy.token_mint.slice(-4)}`;
-                let probabilityScore = uniqueWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
+                    const message = 
+                        `🚨 **CONFLUENCE ALERT (3-Min Hold Verified)** 🚨\n\n` +
+                        `🪙 **Token:** \`${shortToken}\`\n` +
+                        `👤 **Buyer:** \`${shortWallet}\` (Spent ~${Number(buy.sol_spent).toFixed(2)} SOL)\n` +
+                        `👥 **Cluster Activity:** **${uniqueWallets.length} other tracked wallets** also held this past 3 mins.\n` +
+                        `📊 **Status:** ${probabilityScore}\n\n` +
+                        `🔗 [Dexscreener](https://dexscreener.com/solana/${buy.token_mint}) | [Solscan](https://solscan.io/token/${buy.token_mint})`;
 
-                const message = 
-                    `🚨 **CONFLUENCE ALERT (3-Min Hold Verified)** 🚨\n\n` +
-                    `🪙 **Token:** \`${shortToken}\`\n` +
-                    `👤 **Buyer:** \`${shortWallet}\` (Spent ~${Number(buy.sol_spent).toFixed(2)} SOL)\n` +
-                    `👥 **Cluster Activity:** **${uniqueWallets.length} other tracked wallets** also held this past 3 mins.\n` +
-                    `📊 **Status:** ${probabilityScore}\n\n` +
-                    `🔗 [Dexscreener](https://dexscreener.com/solana/${buy.token_mint}) | [Solscan](https://solscan.io/token/${buy.token_mint})`;
-
-                await sendDiscordAlert(message);
+                    await sendDiscordAlert(message);
+                }
             }
         }
 
+        return res.status(200).json({ status: 'received', processed: true });
+
     } catch (err) {
         console.error("Error processing transaction batch:", err);
+        return res.status(500).json({ error: err.message });
     }
 }
