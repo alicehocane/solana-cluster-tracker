@@ -36,8 +36,12 @@ const BLACKLISTED_TOKENS = new Set([
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
 ]);
 
+const MIN_SOL_SPEND = 0.05; 
+const HOLDING_CHECK_MS = 3 * 60 * 1000; // 3 Minutes holding window
+
 global.tokenClusterCache = global.tokenClusterCache || new Map();
-const TIME_WINDOW_MS = 30 * 60 * 1000; // 30 Minutes
+// Cache to track pending buys to verify they don't instant-dump
+global.pendingBuysCache = global.pendingBuysCache || new Map();
 
 async function sendDiscordAlert(message) {
     try {
@@ -62,60 +66,84 @@ export default async function handler(req, res) {
         const transactions = req.body;
         if (!Array.isArray(transactions)) return;
 
+        const now = Date.now();
+
         for (const tx of transactions) {
             if (tx.type !== 'SWAP') continue;
 
-            const involvedTrackedWallet = tx.accountData?.find(acc => 
+            const targetAccount = tx.accountData?.find(acc => 
                 TRACKED_WALLETS.has(acc.account) && acc.nativeBalanceChange < 0
-            )?.account || tx.feePayer;
+            );
 
-            if (!TRACKED_WALLETS.has(involvedTrackedWallet)) continue;
+            if (!targetAccount) continue;
+            const involvedTrackedWallet = targetAccount.account;
+            const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
+
+            if (solSpent < MIN_SOL_SPEND) continue;
+
+            // Check if this is a BUY or a SELL for this wallet
+            const isBuy = tx.tokenTransfers?.some(transfer => transfer.toUserAccount === involvedTrackedWallet);
+            const isSell = tx.tokenTransfers?.some(transfer => transfer.fromUserAccount === involvedTrackedWallet);
 
             const tokenTransfer = tx.tokenTransfers?.find(transfer => 
-                transfer.toUserAccount === involvedTrackedWallet
+                transfer.toUserAccount === involvedTrackedWallet || transfer.fromUserAccount === involvedTrackedWallet
             );
 
             if (!tokenTransfer) continue;
-
             const tokenMint = tokenTransfer.mint;
 
-            // SKIP IF IT IS A BLACKLISTED TOKEN (SOL, USDC, USDT, etc.)
             if (BLACKLISTED_TOKENS.has(tokenMint)) continue;
 
-            const now = Date.now();
-
-            if (!global.tokenClusterCache.has(tokenMint)) {
-                global.tokenClusterCache.set(tokenMint, []);
+            // IF IT'S A SELL: Check if they dumped a pending token within 3 minutes
+            if (isSell) {
+                const pendingKey = `${involvedTrackedWallet}-${tokenMint}`;
+                if (global.pendingBuysCache.has(pendingKey)) {
+                    const buyTime = global.pendingBuysCache.get(pendingKey);
+                    if (now - buyTime < HOLDING_CHECK_MS) {
+                        // They dumped it in under 3 minutes! Cancel/invalidate this buy.
+                        global.pendingBuysCache.delete(pendingKey);
+                        continue;
+                    }
+                }
             }
 
-            const buyers = global.tokenClusterCache.get(tokenMint);
-            const recentBuyers = buyers.filter(b => now - b.timestamp < TIME_WINDOW_MS);
+            // IF IT'S A BUY: Log it and check for cluster confluence
+            if (isBuy) {
+                const pendingKey = `${involvedTrackedWallet}-${tokenMint}`;
+                global.pendingBuysCache.set(pendingKey, now);
 
-            if (!recentBuyers.some(b => b.wallet === involvedTrackedWallet)) {
-                recentBuyers.push({ wallet: involvedTrackedWallet, timestamp: now });
-            }
+                if (!global.tokenClusterCache.has(tokenMint)) {
+                    global.tokenClusterCache.set(tokenMint, []);
+                }
 
-            global.tokenClusterCache.set(tokenMint, recentBuyers);
+                const buyers = global.tokenClusterCache.get(tokenMint);
+                const recentBuyers = buyers.filter(b => now - b.timestamp < (30 * 60 * 1000));
 
-            const otherWallets = recentBuyers.filter(b => b.wallet !== involvedTrackedWallet);
+                if (!recentBuyers.some(b => b.wallet === involvedTrackedWallet)) {
+                    recentBuyers.push({ wallet: involvedTrackedWallet, timestamp: now });
+                }
 
-            let probabilityScore = "Low 🧊";
-            if (otherWallets.length >= 3) probabilityScore = "🔥 HIGH PUMP PROBABILITY 🔥";
-            else if (otherWallets.length >= 1) probabilityScore = "⚡ Medium ⚡";
+                global.tokenClusterCache.set(tokenMint, recentBuyers);
 
-            const shortWallet = `${involvedTrackedWallet.slice(0, 4)}...${involvedTrackedWallet.slice(-4)}`;
-            const shortToken = `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`;
+                const otherWallets = recentBuyers.filter(b => b.wallet !== involvedTrackedWallet);
 
-            const message = 
-                `🚨 **CONFLUENCE ALERT** 🚨\n\n` +
-                `🪙 **Token:** \`${shortToken}\`\n` +
-                `👤 **Buyer:** \`${shortWallet}\`\n` +
-                `👥 **Cluster Activity:** **${otherWallets.length} other tracked wallets** bought this recently.\n` +
-                `📊 **Status:** ${probabilityScore}\n\n` +
-                `🔗 [Dexscreener](https://dexscreener.com/solana/${tokenMint}) | [Solscan](https://solscan.io/token/${tokenMint})`;
+                if (otherWallets.length > 0) {
+                    const shortWallet = `${involvedTrackedWallet.slice(0, 4)}...${involvedTrackedWallet.slice(-4)}`;
+                    const shortToken = `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`;
 
-            if (otherWallets.length > 0) {
-                await sendDiscordAlert(message);
+                    let probabilityScore = otherWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
+
+                    const message = 
+                        `🚨 **CONFLUENCE ALERT (Verified Holder)** 🚨\n\n` +
+                        `🪙 **Token:** \`${shortToken}\`\n` +
+                        `👤 **Buyer:** \`${shortWallet}\` (Spent ~${solSpent.toFixed(2)} SOL)\n` +
+                        `👥 **Cluster Activity:** **${otherWallets.length} other tracked wallets** bought this.\n` +
+                        `⏳ *Note: Alert triggers only if they hold past the 3-minute mark.*\n` +
+                        `📊 **Status:** ${probabilityScore}\n\n` +
+                        `🔗 [Dexscreener](https://dexscreener.com/solana/${tokenMint}) | [Solscan](https://solscan.io/token/${tokenMint})`;
+
+                    await sendDiscordAlert(message);
+                }
             }
         }
     } catch (err) {
