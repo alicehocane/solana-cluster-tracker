@@ -1,6 +1,13 @@
+import { createClient } from '@supabase/supabase-js';
+
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "https://discord.com/api/webhooks/1545746746242498620/LjsCpbblr-07w1Gi9GcQrTn39MspeX6sn8lnTbkvcFEJKKjG0x_gFS1QcYlD1eago97-";
 
-// 1. YOUR LIST OF TRACKED WALLETS
+// Initialize Supabase Client
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY
+);
+
 const TRACKED_WALLETS = new Set([
     "9oKGw6n6tjGC7mGuS4PLRYx1xSMt2pAzFdCibUjdaX2m",
     "3VMW45SQTeSxFrSozjBbx49qqQ2z6HKUezvakAPwHwhz",
@@ -29,19 +36,14 @@ const TRACKED_WALLETS = new Set([
     "ETwAcPeN87KmFm8xPBsSiQCuqnyLgLdU9qevbf5t8KLn"
 ]);
 
-// 2. TOKENS TO IGNORE (Wrapped SOL, USDC, USDT, Native SOL mints)
 const BLACKLISTED_TOKENS = new Set([
-    "So11111111111111111111111111111111111111112", // Wrapped SOL (WSOL)
+    "So11111111111111111111111111111111111111112", // Wrapped SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
 ]);
 
 const MIN_SOL_SPEND = 0.05; 
-const HOLDING_CHECK_MS = 3 * 60 * 1000; // 3 Minutes holding window
-
-global.tokenClusterCache = global.tokenClusterCache || new Map();
-// Cache to track pending buys to verify they don't instant-dump
-global.pendingBuysCache = global.pendingBuysCache || new Map();
+const HOLDING_CHECK_MS = 3 * 60 * 1000; // 3 Minutes
 
 async function sendDiscordAlert(message) {
     try {
@@ -72,18 +74,11 @@ export default async function handler(req, res) {
             if (tx.type !== 'SWAP') continue;
 
             const targetAccount = tx.accountData?.find(acc => 
-                TRACKED_WALLETS.has(acc.account) && acc.nativeBalanceChange < 0
+                TRACKED_WALLETS.has(acc.account)
             );
 
             if (!targetAccount) continue;
             const involvedTrackedWallet = targetAccount.account;
-            const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
-
-            if (solSpent < MIN_SOL_SPEND) continue;
-
-            // Check if this is a BUY or a SELL for this wallet
-            const isBuy = tx.tokenTransfers?.some(transfer => transfer.toUserAccount === involvedTrackedWallet);
-            const isSell = tx.tokenTransfers?.some(transfer => transfer.fromUserAccount === involvedTrackedWallet);
 
             const tokenTransfer = tx.tokenTransfers?.find(transfer => 
                 transfer.toUserAccount === involvedTrackedWallet || transfer.fromUserAccount === involvedTrackedWallet
@@ -91,61 +86,91 @@ export default async function handler(req, res) {
 
             if (!tokenTransfer) continue;
             const tokenMint = tokenTransfer.mint;
-
             if (BLACKLISTED_TOKENS.has(tokenMint)) continue;
 
-            // IF IT'S A SELL: Check if they dumped a pending token within 3 minutes
+            const isBuy = tokenTransfer.toUserAccount === involvedTrackedWallet;
+            const isSell = tokenTransfer.fromUserAccount === involvedTrackedWallet;
+
+            // 1. IF IT'S A SELL: Mark any pending buy for this wallet/token as cancelled (Dumped under 3 mins)
             if (isSell) {
-                const pendingKey = `${involvedTrackedWallet}-${tokenMint}`;
-                if (global.pendingBuysCache.has(pendingKey)) {
-                    const buyTime = global.pendingBuysCache.get(pendingKey);
-                    if (now - buyTime < HOLDING_CHECK_MS) {
-                        // They dumped it in under 3 minutes! Cancel/invalidate this buy.
-                        global.pendingBuysCache.delete(pendingKey);
-                        continue;
-                    }
-                }
+                await supabase
+                    .from('tracked_pending_buys')
+                    .update({ status: 'cancelled' })
+                    .eq('wallet', involvedTrackedWallet)
+                    .eq('token_mint', tokenMint)
+                    .eq('status', 'pending');
+                continue;
             }
 
-            // IF IT'S A BUY: Log it and check for cluster confluence
+            // 2. IF IT'S A BUY: Record it as pending in Supabase
             if (isBuy) {
-                const pendingKey = `${involvedTrackedWallet}-${tokenMint}`;
-                global.pendingBuysCache.set(pendingKey, now);
+                const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
+                if (solSpent < MIN_SOL_SPEND) continue;
 
-                if (!global.tokenClusterCache.has(tokenMint)) {
-                    global.tokenClusterCache.set(tokenMint, []);
-                }
-
-                const buyers = global.tokenClusterCache.get(tokenMint);
-                const recentBuyers = buyers.filter(b => now - b.timestamp < (30 * 60 * 1000));
-
-                if (!recentBuyers.some(b => b.wallet === involvedTrackedWallet)) {
-                    recentBuyers.push({ wallet: involvedTrackedWallet, timestamp: now });
-                }
-
-                global.tokenClusterCache.set(tokenMint, recentBuyers);
-
-                const otherWallets = recentBuyers.filter(b => b.wallet !== involvedTrackedWallet);
-
-                if (otherWallets.length > 0) {
-                    const shortWallet = `${involvedTrackedWallet.slice(0, 4)}...${involvedTrackedWallet.slice(-4)}`;
-                    const shortToken = `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`;
-
-                    let probabilityScore = otherWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
-
-                    const message = 
-                        `🚨 **CONFLUENCE ALERT (Verified Holder)** 🚨\n\n` +
-                        `🪙 **Token:** \`${shortToken}\`\n` +
-                        `👤 **Buyer:** \`${shortWallet}\` (Spent ~${solSpent.toFixed(2)} SOL)\n` +
-                        `👥 **Cluster Activity:** **${otherWallets.length} other tracked wallets** bought this.\n` +
-                        `⏳ *Note: Alert triggers only if they hold past the 3-minute mark.*\n` +
-                        `📊 **Status:** ${probabilityScore}\n\n` +
-                        `🔗 [Dexscreener](https://dexscreener.com/solana/${tokenMint}) | [Solscan](https://solscan.io/token/${tokenMint})`;
-
-                    await sendDiscordAlert(message);
-                }
+                await supabase.from('tracked_pending_buys').insert([
+                    {
+                        wallet: involvedTrackedWallet,
+                        token_mint: tokenMint,
+                        buy_timestamp: now,
+                        sol_spent: solSpent,
+                        status: 'pending'
+                    }
+                ]);
             }
         }
+
+        // 3. CHECK FOR SURVIVING BUYS (Passed the 3-minute mark without selling)
+        const threeMinutesAgo = now - HOLDING_CHECK_MS;
+        
+        const { data: matureBuys, error } = await supabase
+            .from('tracked_pending_buys')
+            .select('*')
+            .eq('status', 'pending')
+            .lte('buy_timestamp', threeMinutesAgo);
+
+        if (error || !matureBuys) return;
+
+        // Process mature buys to check cluster confluence and notify
+        for (const buy of matureBuys) {
+            // Mark as verified so we don't alert twice
+            await supabase
+                .from('tracked_pending_buys')
+                .update({ status: 'verified' })
+                .eq('id', buy.id);
+
+            // Check how many other unique wallets bought this token within a 30-minute window of this buy
+            const thirtyMinsBefore = buy.buy_timestamp - (30 * 60 * 1000);
+            const thirtyMinsAfter = buy.buy_timestamp + (30 * 60 * 1000);
+
+            const { data: clusterData } = await supabase
+                .from('tracked_pending_buys')
+                .select('wallet')
+                .eq('token_mint', buy.token_mint)
+                .gte('buy_timestamp', thirtyMinsBefore)
+                .lte('buy_timestamp', thirtyMinsAfter);
+
+            if (!clusterData) continue;
+
+            // Extract unique other wallets
+            const uniqueWallets = [...new Set(clusterData.map(c => c.wallet))].filter(w => w !== buy.wallet);
+
+            if (uniqueWallets.length > 0) {
+                const shortWallet = `${buy.wallet.slice(0, 4)}...${buy.wallet.slice(-4)}`;
+                const shortToken = `${buy.token_mint.slice(0, 4)}...${buy.token_mint.slice(-4)}`;
+                let probabilityScore = uniqueWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
+
+                const message = 
+                    `🚨 **CONFLUENCE ALERT (3-Min Hold Verified)** 🚨\n\n` +
+                    `🪙 **Token:** \`${shortToken}\`\n` +
+                    `👤 **Buyer:** \`${shortWallet}\` (Spent ~${Number(buy.sol_spent).toFixed(2)} SOL)\n` +
+                    `👥 **Cluster Activity:** **${uniqueWallets.length} other tracked wallets** also held this past 3 mins.\n` +
+                    `📊 **Status:** ${probabilityScore}\n\n` +
+                    `🔗 [Dexscreener](https://dexscreener.com/solana/${buy.token_mint}) | [Solscan](https://solscan.io/token/${buy.token_mint})`;
+
+                await sendDiscordAlert(message);
+            }
+        }
+
     } catch (err) {
         console.error("Error processing transaction batch:", err);
     }
