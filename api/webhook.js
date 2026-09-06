@@ -14,10 +14,28 @@ const TRACKED_WALLETS = new Set([
     "4w8St7tNUNqgAXvXd4BjhkByV1w9vagp2yjUyrnoU4ZS",
     "Ggnm2KVizsXedUrBJqjXtg8ztgCw3C5P6swVfSiFQ2SH",
     "8eGqytw6HWhykdBoA9gNWZv7t7vYr6X8KeoDABU1731y",
-    "3bwkvwoYnyC9GMVFn2EWeAJ2YptCnZDWdc284SdWD2gd"
+    "3bwkvwoYnyC9GMVFn2EWeAJ2YptCnZDWdc284SdWD2gd",
+    "3pLheGVtmHLe5xDpVXWLLPmcKquNLTGMEmzTofxLmoCC",
+    "8mNGKZAsSwgmhrkVnvhmcuSDW3Bt5s1GSS7uzd93DcmV",
+    "BHREKFkPQgAtDs8Vb1UfLkUpjG6ScidTjHaCWFuG2AtX",
+    "Hj7UJq2DFqYdPv7JZzWWiRcNG36vD8knmWbggBfXNc51",
+    "ALaYhQti7bcSb1MNFjkz4TPTeHKCvdCy3ivN8tmQdh35",
+    "5xwjQ3s8jytQ4nBYnBbzM34xSGWtjRAy8dwn9vPKtGNS",
+    "E8tXebsK9bKkr44YSkfnmmWftGzcFZboHJcVMt3Kis4w",
+    "CTnhDdpKCdRBNXocZgGh4aeM1vxTSsXLT68CTAZLUzWD",
+    "ETRwCdhkKYQk6HK58zGAd8aEEpTQuMUBwXhEfG9v2Jb3",
+    "CnjMc5DeNmhPSYZ2xFpNqtKGuU8ETTKHqUQwicapboDj",
+    "L2vRhKZsQcRUHvy1PEY4dCJ37XhfqHzgRrgAgfs4FFN",
+    "ETwAcPeN87KmFm8xPBsSiQCuqnyLgLdU9qevbf5t8KLn"
 ]);
 
-// Persistent global cache for Vercel serverless instances
+// 2. TOKENS TO IGNORE (Wrapped SOL, USDC, USDT, Native SOL mints)
+const BLACKLISTED_TOKENS = new Set([
+    "So11111111111111111111111111111111111111112", // Wrapped SOL (WSOL)
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+]);
+
 global.tokenClusterCache = global.tokenClusterCache || new Map();
 const TIME_WINDOW_MS = 30 * 60 * 1000; // 30 Minutes
 
@@ -34,12 +52,10 @@ async function sendDiscordAlert(message) {
 }
 
 export default async function handler(req, res) {
-    // Only accept POST requests from Helius webhooks
     if (req.method !== 'POST') {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Respond instantly to Helius to prevent timeouts
     res.status(200).json({ status: 'received' });
 
     try {
@@ -62,6 +78,10 @@ export default async function handler(req, res) {
             if (!tokenTransfer) continue;
 
             const tokenMint = tokenTransfer.mint;
+
+            // SKIP IF IT IS A BLACKLISTED TOKEN (SOL, USDC, USDT, etc.)
+            if (BLACKLISTED_TOKENS.has(tokenMint)) continue;
+
             const now = Date.now();
 
             if (!global.tokenClusterCache.has(tokenMint)) {
