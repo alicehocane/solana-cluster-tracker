@@ -12,9 +12,9 @@ const TRACKED_WALLETS = new Set([
     "9oKGw6n6tjGC7mGuS4PLRYx1xSMt2pAzFdCibUjdaX2m",
     "3VMW45SQTeSxFrSozjBbx49qqQ2z6HKUezvakAPwHwhz",
     "GkVZ6BRP3nd8LYwCAdniVdTS2R8zniRbkN5tZhhvLBtY",
-    "835GEJgjDt4B4LzC33vYpt6dQXUWJqkkVnWVnGP3WUKN",
+    "5cQM6QHmdLPS8AEKA8KtszFmC8Rq4YrDj9WpWDtXTqSy",
     "7UDarSsvMu64SDyL5dayANca8za87tbyeuAdGjMKWf16",
-    "7iG1nhuNPXjUq2D2LJXywBE1zAXQQFzDFvf7hKNjZf26",
+    "EHg5YkU2SZBTvuT87rUsvxArGp3HLeye1fXaSDfuMyaf",
     "BgpLrxjCPFrvqEUQNrMxhP7ZmDNbjwcaX8fzy3ZuYvzT",
     "BQdbTPv9iuPjU6swSVJEsdv3hutS1UxFstTpx4KRVZEm",
     "3Qchg1ipMKRoqDktu27yNMvcPe3xTHD9q7uJe6Xtbua2",
@@ -91,13 +91,14 @@ export default async function handler(req, res) {
             const isBuy = tokenTransfer.toUserAccount === involvedTrackedWallet;
             const isSell = tokenTransfer.fromUserAccount === involvedTrackedWallet;
 
+            // If any tracked wallet sells the token, cancel their pending/verified buy states
             if (isSell) {
                 await supabase
                     .from('tracked_pending_buys')
                     .update({ status: 'cancelled' })
                     .eq('wallet', involvedTrackedWallet)
                     .eq('token_mint', tokenMint)
-                    .eq('status', 'pending');
+                    .in('status', ['pending', 'verified']);
                 continue;
             }
 
@@ -105,6 +106,7 @@ export default async function handler(req, res) {
                 const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
                 if (solSpent < MIN_SOL_SPEND) continue;
 
+                // Insert new pending buy record
                 await supabase.from('tracked_pending_buys').insert([
                     {
                         wallet: involvedTrackedWallet,
@@ -119,48 +121,70 @@ export default async function handler(req, res) {
 
         const threeMinutesAgo = now - HOLDING_CHECK_MS;
         
+        // Find all pending buys that have successfully survived at least 3 minutes
         const { data: matureBuys, error } = await supabase
             .from('tracked_pending_buys')
             .select('*')
             .eq('status', 'pending')
             .lte('buy_timestamp', threeMinutesAgo);
 
-        if (!error && matureBuys) {
-            for (const buy of matureBuys) {
-                await supabase
-                    .from('tracked_pending_buys')
-                    .update({ status: 'verified' })
-                    .eq('id', buy.id);
+        if (!error && matureBuys && matureBuys.length > 0) {
+            // Group mature buys by unique token_mints to prevent duplicate alerts for the same coin
+            const uniqueTokens = [...new Set(matureBuys.map(b => b.token_mint))];
 
-                const thirtyMinsBefore = buy.buy_timestamp - (30 * 60 * 1000);
-                const thirtyMinsAfter = buy.buy_timestamp + (30 * 60 * 1000);
+            for (const tokenMint of uniqueTokens) {
+                // Fetch all active/pending buys for this specific token within a ±30 min window cluster
+                const baseBuy = matureBuys.find(b => b.token_mint === tokenMint);
+                const thirtyMinsBefore = baseBuy.buy_timestamp - (30 * 60 * 1000);
+                const thirtyMinsAfter = baseBuy.buy_timestamp + (30 * 60 * 1000);
 
                 const { data: clusterData } = await supabase
                     .from('tracked_pending_buys')
-                    .select('wallet')
-                    .eq('token_mint', buy.token_mint)
+                    .select('wallet, sol_spent, buy_timestamp')
+                    .eq('token_mint', tokenMint)
+                    .in('status', ['pending', 'verified'])
                     .gte('buy_timestamp', thirtyMinsBefore)
-                    .lte('buy_timestamp', thirtyMinsAfter);
+                    .lte('buy_timestamp', thirtyMinsAfter)
+                    .order('buy_timestamp', { ascending: true }); // First buyer comes first
 
-                if (!clusterData) continue;
+                if (!clusterData || clusterData.length === 0) continue;
 
-                const uniqueWallets = [...new Set(clusterData.map(c => c.wallet))].filter(w => w !== buy.wallet);
+                // Mark all these associated records as 'notified' so they never trigger again
+                const recordIds = clusterData.map(c => c.id).filter(Boolean);
+                await supabase
+                    .from('tracked_pending_buys')
+                    .update({ status: 'notified' })
+                    .eq('token_mint', tokenMint)
+                    .eq('status', 'pending');
 
-                if (uniqueWallets.length > 0) {
-                    const shortWallet = `${buy.wallet.slice(0, 4)}...${buy.wallet.slice(-4)}`;
-                    const shortToken = `${buy.token_mint.slice(0, 4)}...${buy.token_mint.slice(-4)}`;
-                    let probabilityScore = uniqueWallets.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
+                // Format unique buyers list cleanly with comma separation
+                const uniqueBuyersMap = new Map();
+                clusterData.forEach(item => {
+                    if (!uniqueBuyersMap.has(item.wallet)) {
+                        uniqueBuyersMap.set(item.wallet, item.sol_spent);
+                    }
+                });
 
-                    const message = 
-                        `🚨 **CONFLUENCE ALERT (3-Min Hold Verified)** 🚨\n\n` +
-                        `🪙 **Token:** \`${shortToken}\`\n` +
-                        `👤 **Buyer:** \`${shortWallet}\` (Spent ~${Number(buy.sol_spent).toFixed(2)} SOL)\n` +
-                        `👥 **Cluster Activity:** **${uniqueWallets.length} other tracked wallets** also held this past 3 mins.\n` +
-                        `📊 **Status:** ${probabilityScore}\n\n` +
-                        `🔗 [Dexscreener](https://dexscreener.com/solana/${buy.token_mint}) | [Solscan](https://solscan.io/token/${buy.token_mint})`;
+                const buyerEntries = Array.from(uniqueBuyersMap.entries());
+                const primaryBuyerWallet = buyerEntries[0][0];
+                
+                // Format buyers string with comma separation as requested
+                const formattedBuyersString = buyerEntries
+                    .map(([wallet, spent]) => `\`${wallet.slice(0, 4)}...${wallet.slice(-4)}\` (Spent ~${Number(spent).toFixed(2)} SOL)`)
+                    .join(', ');
 
-                    await sendDiscordAlert(message);
-                }
+                const shortToken = `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`;
+                let probabilityScore = buyerEntries.length >= 3 ? "🔥 HIGH PUMP PROBABILITY 🔥" : "⚡ Medium ⚡";
+
+                const message = 
+                    `🚨 **CONFLUENCE ALERT (3-Min Hold Verified)** 🚨\n\n` +
+                    `🪙 **Token:** \`${shortToken}\`\n` +
+                    `👤 **Buyer(s):** ${formattedBuyersString}\n` +
+                    `👥 **Cluster Activity:** **${buyerEntries.length} tracked wallet(s)** held this past 3 mins.\n` +
+                    `📊 **Status:** ${probabilityScore}\n\n` +
+                    `🔗 [Dexscreener](https://dexscreener.com/solana/${tokenMint}?maker=${primaryBuyerWallet}) | [Solscan](https://solscan.io/token/${tokenMint})`;
+
+                await sendDiscordAlert(message);
             }
         }
 
