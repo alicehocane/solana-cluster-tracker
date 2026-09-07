@@ -91,7 +91,6 @@ export default async function handler(req, res) {
             const isBuy = tokenTransfer.toUserAccount === involvedTrackedWallet;
             const isSell = tokenTransfer.fromUserAccount === involvedTrackedWallet;
 
-            // If any tracked wallet sells the token, cancel their pending/verified buy states
             if (isSell) {
                 await supabase
                     .from('tracked_pending_buys')
@@ -106,7 +105,6 @@ export default async function handler(req, res) {
                 const solSpent = Math.abs(targetAccount.nativeBalanceChange) / 1e9;
                 if (solSpent < MIN_SOL_SPEND) continue;
 
-                // Insert new pending buy record
                 await supabase.from('tracked_pending_buys').insert([
                     {
                         wallet: involvedTrackedWallet,
@@ -121,7 +119,6 @@ export default async function handler(req, res) {
 
         const threeMinutesAgo = now - HOLDING_CHECK_MS;
         
-        // Find all pending buys that have successfully survived at least 3 minutes
         const { data: matureBuys, error } = await supabase
             .from('tracked_pending_buys')
             .select('*')
@@ -129,11 +126,9 @@ export default async function handler(req, res) {
             .lte('buy_timestamp', threeMinutesAgo);
 
         if (!error && matureBuys && matureBuys.length > 0) {
-            // Group mature buys by unique token_mints to prevent duplicate alerts for the same coin
             const uniqueTokens = [...new Set(matureBuys.map(b => b.token_mint))];
 
             for (const tokenMint of uniqueTokens) {
-                // Fetch all active/pending buys for this specific token within a ±30 min window cluster
                 const baseBuy = matureBuys.find(b => b.token_mint === tokenMint);
                 const thirtyMinsBefore = baseBuy.buy_timestamp - (30 * 60 * 1000);
                 const thirtyMinsAfter = baseBuy.buy_timestamp + (30 * 60 * 1000);
@@ -145,19 +140,16 @@ export default async function handler(req, res) {
                     .in('status', ['pending', 'verified'])
                     .gte('buy_timestamp', thirtyMinsBefore)
                     .lte('buy_timestamp', thirtyMinsAfter)
-                    .order('buy_timestamp', { ascending: true }); // First buyer comes first
+                    .order('buy_timestamp', { ascending: true });
 
                 if (!clusterData || clusterData.length === 0) continue;
 
-                // Mark all these associated records as 'notified' so they never trigger again
-                const recordIds = clusterData.map(c => c.id).filter(Boolean);
                 await supabase
                     .from('tracked_pending_buys')
                     .update({ status: 'notified' })
                     .eq('token_mint', tokenMint)
                     .eq('status', 'pending');
 
-                // Format unique buyers list cleanly with comma separation
                 const uniqueBuyersMap = new Map();
                 clusterData.forEach(item => {
                     if (!uniqueBuyersMap.has(item.wallet)) {
@@ -168,9 +160,9 @@ export default async function handler(req, res) {
                 const buyerEntries = Array.from(uniqueBuyersMap.entries());
                 const primaryBuyerWallet = buyerEntries[0][0];
                 
-                // Format buyers string with comma separation as requested
+                // Display full wallet address enclosed in code blocks (``) so it's easily copyable
                 const formattedBuyersString = buyerEntries
-                    .map(([wallet, spent]) => `\`${wallet.slice(0, 4)}...${wallet.slice(-4)}\` (Spent ~${Number(spent).toFixed(2)} SOL)`)
+                    .map(([wallet, spent]) => `\`${wallet}\` (Spent ~${Number(spent).toFixed(2)} SOL)`)
                     .join(', ');
 
                 const shortToken = `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`;
