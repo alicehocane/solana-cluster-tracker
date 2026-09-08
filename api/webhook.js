@@ -14,7 +14,7 @@ const TRACKED_WALLETS = new Set([
     "GkVZ6BRP3nd8LYwCAdniVdTS2R8zniRbkN5tZhhvLBtY",
     "5cQM6QHmdLPS8AEKA8KtszFmC8Rq4YrDj9WpWDtXTqSy",
     "7UDarSsvMu64SDyL5dayANca8za87tbyeuAdGjMKWf16",
-    "EHg5YkU2SZBTvuT87rUsvxArGp3HLeye1fXaSDfuMyaf",
+    "J6k8KMhPdry5xr8Qv7dFxuGJKf2hrcPt5sxvmmc3PhLY",
     "BgpLrxjCPFrvqEUQNrMxhP7ZmDNbjwcaX8fzy3ZuYvzT",
     "BQdbTPv9iuPjU6swSVJEsdv3hutS1UxFstTpx4KRVZEm",
     "3Qchg1ipMKRoqDktu27yNMvcPe3xTHD9q7uJe6Xtbua2",
@@ -30,9 +30,9 @@ const TRACKED_WALLETS = new Set([
     "5xwjQ3s8jytQ4nBYnBbzM34xSGWtjRAy8dwn9vPKtGNS",
     "E8tXebsK9bKkr44YSkfnmmWftGzcFZboHJcVMt3Kis4w",
     "CTnhDdpKCdRBNXocZgGh4aeM1vxTSsXLT68CTAZLUzWD",
-    "ETRwCdhkKYQk6HK58zGAd8aEEpTQuMUBwXhEfG9v2Jb3",
+    "HNKvqBj7majHp8gbQgSwpxdEk1vPWrcdghs5EMYk2ZEw",
     "CnjMc5DeNmhPSYZ2xFpNqtKGuU8ETTKHqUQwicapboDj",
-    "L2vRhKZsQcRUHvy1PEY4dCJ37XhfqHzgRrgAgfs4FFN",
+    "835GEJgjDt4B4LzC33vYpt6dQXUWJqkkVnWVnGP3WUKN",
     "ETwAcPeN87KmFm8xPBsSiQCuqnyLgLdU9qevbf5t8KLn"
 ]);
 
