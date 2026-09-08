@@ -137,27 +137,30 @@ export default async function handler(req, res) {
         if (!error && matureBuys && matureBuys.length > 0) {
             const uniqueTokens = [...new Set(matureBuys.map(b => b.token_mint))];
 
+            // IMMEDIATELY lock all these tokens so they can never duplicate in this batch or concurrent runs
             for (const tokenMint of uniqueTokens) {
-                const baseBuy = matureBuys.find(b => b.token_mint === tokenMint);
-                const thirtyMinsBefore = baseBuy.buy_timestamp - (30 * 60 * 1000);
-                const thirtyMinsAfter = baseBuy.buy_timestamp + (30 * 60 * 1000);
-
-                const { data: clusterData } = await supabase
-                    .from('tracked_pending_buys')
-                    .select('wallet, sol_spent, buy_timestamp')
-                    .eq('token_mint', tokenMint)
-                    .in('status', ['pending', 'verified'])
-                    .gte('buy_timestamp', thirtyMinsBefore)
-                    .lte('buy_timestamp', thirtyMinsAfter)
-                    .order('buy_timestamp', { ascending: true });
-
-                if (!clusterData || clusterData.length === 0) continue;
-
                 await supabase
                     .from('tracked_pending_buys')
                     .update({ status: 'notified' })
                     .eq('token_mint', tokenMint)
                     .eq('status', 'pending');
+            }
+
+            // Now loop cleanly through each unique token once
+            for (const tokenMint of uniqueTokens) {
+                const thirtyMinsBefore = now - (30 * 60 * 1000);
+                const thirtyMinsAfter = now + (30 * 60 * 1000);
+
+                const { data: clusterData } = await supabase
+                    .from('tracked_pending_buys')
+                    .select('wallet, sol_spent, buy_timestamp')
+                    .eq('token_mint', tokenMint)
+                    .in('status', ['pending', 'verified', 'notified'])
+                    .gte('buy_timestamp', thirtyMinsBefore)
+                    .lte('buy_timestamp', thirtyMinsAfter)
+                    .order('buy_timestamp', { ascending: true });
+
+                if (!clusterData || clusterData.length === 0) continue;
 
                 const uniqueBuyersMap = new Map();
                 clusterData.forEach(item => {
@@ -169,7 +172,6 @@ export default async function handler(req, res) {
                 const buyerEntries = Array.from(uniqueBuyersMap.entries());
                 const primaryBuyerWallet = buyerEntries[0][0];
                 
-                // Display full wallet address enclosed in code blocks (``) so it's easily copyable
                 const formattedBuyersString = buyerEntries
                     .map(([wallet, spent]) => `\`${wallet}\` (Spent ~${Number(spent).toFixed(2)} SOL)`)
                     .join(', ');
